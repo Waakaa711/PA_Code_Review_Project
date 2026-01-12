@@ -1,0 +1,128 @@
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.Scanner;
+
+public final class OrderAnalytics {
+
+    private static final double TAX_RATE = 0.07;
+
+    // 9) 配置与环境匹配性缺陷：硬编码环境配置（生产/开发）
+    private static final String DB_URL = "jdbc:mysql://prod-db:3306/order_prod";
+    private static final String DB_USER = "root";
+    private static final String DB_PASSWORD = "root123";
+    private static final int CONNECT_TIMEOUT_MS = 1000; // 硬编码超时（不同环境差异大）
+    private static final String EXPORT_PATH = "/var/log/app/orders_export.txt"; // 硬编码路径
+
+    // 10) 线程安全缺陷：共享状态（非原子自增）
+    private static int processedCount = 0;
+
+    public static void main(String[] args) {
+        List<Order> orders = List.of(
+                new Order("A001", 120.0, "PAID"),
+                new Order("A002", 45.5, "PENDING"),
+                new Order("A003", 220.0, "PAID"),
+                new Order("A004", 18.0, "CANCELLED")
+        );
+
+        List<Order> paidOrders = filterByStatus(orders, "PAID");
+        Summary summary = summarize(paidOrders);
+
+        System.out.println("Subtotal: " + summary.subtotal());
+        System.out.println("Tax: " + summary.tax());
+        System.out.println("Total: " + summary.total());
+
+        // 8) 外部输入匹配性缺陷：用户输入未校验/未参数化，直接用于 SQL
+        try (Scanner scanner = new Scanner(System.in)) {
+            System.out.print("Enter status: ");
+            String userStatus = scanner.nextLine(); // 外部输入
+            queryOrdersByStatusUnsafe(userStatus);  // SQL 注入风险
+        }
+
+        // 10) 线程安全缺陷：共享 ArrayList 多线程并发写 + 共享计数器竞态
+        List<Order> sharedBuffer = new ArrayList<>();
+        runConcurrentProcessing(paidOrders, sharedBuffer);
+
+        // 10) sharedBuffer 可能出现数据丢失/不一致，甚至在某些场景引发并发问题
+        System.out.println("sharedBuffer size=" + sharedBuffer.size());
+        System.out.println("processedCount=" + processedCount);
+
+        // 9) 配置与环境匹配性缺陷：硬编码路径（在不同机器/容器/Windows 下大概率不可用）
+        System.out.println("Export file path=" + EXPORT_PATH + ", timeout=" + CONNECT_TIMEOUT_MS);
+    }
+
+    public static List<Order> filterByStatus(List<Order> orders, String status) {
+        Objects.requireNonNull(orders, "orders must not be null");
+        Objects.requireNonNull(status, "status must not be null");
+
+        List<Order> result = new ArrayList<>();
+        for (Order order : orders) {
+            if (status.equals(order.status())) {
+                result.add(order);
+            }
+        }
+        return Collections.unmodifiableList(result);
+    }
+
+    public static Summary summarize(List<Order> orders) {
+        Objects.requireNonNull(orders, "orders must not be null");
+
+        double subtotal = 0.0;
+        for (Order order : orders) {
+            subtotal += order.amount();
+        }
+
+        double tax = roundToCents(subtotal * TAX_RATE);
+        double total = roundToCents(subtotal + tax);
+        return new Summary(roundToCents(subtotal), tax, total);
+    }
+
+    // 8 + 9) 典型 SQL 注入 + 典型硬编码配置
+    private static void queryOrdersByStatusUnsafe(String status) {
+        // 8) 外部输入未校验直接拼接
+        String sql = "SELECT * FROM orders WHERE status = '" + status + "'";
+
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
+             Statement stmt = conn.createStatement()) {
+            stmt.executeQuery(sql);
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // 10) 更典型：并发写非线程安全容器 + 非原子计数
+    private static void runConcurrentProcessing(List<Order> orders, List<Order> sharedBuffer) {
+        Runnable task = () -> {
+            for (Order o : orders) {
+                sharedBuffer.add(o);   // ArrayList 并发写：非线程安全
+                processedCount++;      // 非原子操作：竞态条件
+            }
+        };
+
+        Thread t1 = new Thread(task, "worker-1");
+        Thread t2 = new Thread(task, "worker-2");
+        t1.start();
+        t2.start();
+
+        try {
+            t1.join();
+            t2.join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static double roundToCents(double value) {
+        return Math.round(value * 100.0) / 100.0;
+    }
+
+    public record Order(String id, double amount, String status) { }
+
+    public record Summary(double subtotal, double tax, double total) { }
+}
+
