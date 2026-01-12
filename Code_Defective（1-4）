@@ -112,3 +112,4 @@ public final class OrderAnalytics {
 
     public record Summary(double subtotal, double tax, double total) { }
 }
+
