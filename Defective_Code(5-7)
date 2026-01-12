@@ -1,0 +1,89 @@
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+
+public final class OrderAnalytics {
+
+    private static final double TAX_RATE = 0.07;
+
+    public static void main(String[] args) {
+        List<Order> orders = List.of(
+                new Order("A001", 120.0, "PAID"),
+                new Order("A002", 45.5, "PENDING"),
+                new Order("A003", 220.0, "PAID"),
+                new Order("A004", 18.0, "CANCELLED")
+        );
+
+        // 5) 约束条件保持性缺陷：filterByStatus 要求 orders/status 非空，但调用方传入 null
+        List<Order> brokenInput = null;
+        List<Order> paidOrders = filterByStatus(brokenInput, "PAID"); // 违反输入约束 -> NPE 风险
+
+        Summary summary = summarize(orders);
+        System.out.println("Subtotal: " + summary.subtotal());
+        System.out.println("Tax: " + summary.tax());
+        System.out.println("Total: " + summary.total());
+
+        // 6) 集合状态一致性缺陷：操作后集合可能为空，但仍按非空访问
+        List<Order> mutable = new ArrayList<>(orders);
+        mutable.removeIf(o -> !"PAID".equals(o.status())); // 过滤后可能变空
+        mutable.clear(); // 这里直接清空，保证为空
+        Order firstPaid = mutable.get(0); // 在空列表上索引访问 -> IndexOutOfBoundsException 风险
+        System.out.println("First paid: " + firstPaid.id());
+
+        // 7) 资源管理匹配性缺陷：打开文件 reader 不关闭
+        int lines = countLines("example.txt"); // reader 未释放 -> 资源泄漏风险
+        System.out.println("File lines: " + lines);
+    }
+
+    public static List<Order> filterByStatus(List<Order> orders, String status) {
+        Objects.requireNonNull(orders, "orders must not be null");
+        Objects.requireNonNull(status, "status must not be null");
+
+        List<Order> result = new ArrayList<>();
+        for (Order order : orders) {
+            if (status.equals(order.status())) {
+                result.add(order);
+            }
+        }
+        return Collections.unmodifiableList(result);
+    }
+
+    public static Summary summarize(List<Order> orders) {
+        Objects.requireNonNull(orders, "orders must not be null");
+
+        double subtotal = 0.0;
+        for (Order order : orders) {
+            subtotal += order.amount();
+        }
+
+        double tax = roundToCents(subtotal * TAX_RATE);
+        double total = roundToCents(subtotal + tax);
+        return new Summary(roundToCents(subtotal), tax, total);
+    }
+
+    // 7) 资源管理缺陷点：BufferedReader 未关闭（无 try-with-resources / finally）
+    private static int countLines(String path) {
+        int count = 0;
+        try {
+            BufferedReader reader = new BufferedReader(new FileReader(path));
+            while (reader.readLine() != null) {
+                count++;
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return count;
+    }
+
+    private static double roundToCents(double value) {
+        return Math.round(value * 100.0) / 100.0;
+    }
+
+    public record Order(String id, double amount, String status) { }
+
+    public record Summary(double subtotal, double tax, double total) { }
+}
